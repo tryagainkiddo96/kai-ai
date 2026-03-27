@@ -1,0 +1,2 @@
+APP_NAME = 'WormGPT V7'
+VERSION = '7.0.0'

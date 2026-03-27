@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QFileDialog,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtCore import QThread
 from PyQt5.QtGui import QColor
 
@@ -465,11 +465,111 @@ class WorkspaceContextBar(QWidget):
         return "..." + path[-(max_length - 3):]
 
 
+class AsyncLoadingWidget(QWidget):
+    """Lightweight loading receipt shown in chat while async commands run."""
+
+    def __init__(self, command="/command", parent=None):
+        super().__init__(parent)
+        self.command = command
+        self.dot_count = 0
+        self._destroyed = False
+        self.setup_ui()
+        self.setup_animation()
+
+    def setup_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(15, 5, 15, 5)
+        main_layout.setSpacing(0)
+
+        bubble_container = QWidget()
+        bubble_layout = QHBoxLayout(bubble_container)
+        bubble_layout.setContentsMargins(15, 12, 15, 12)
+        bubble_layout.setSpacing(10)
+
+        # Animated dots label
+        self.label = QLabel(self._build_text())
+        self.label.setWordWrap(False)
+        self.label.setStyleSheet(
+            """
+            QLabel {
+                color: rgba(0, 198, 255, 0.9);
+                font-style: italic;
+                font-size: 13px;
+                font-weight: 600;
+                background: transparent;
+                font-family: 'Segoe UI';
+            }
+            """
+        )
+        bubble_layout.addWidget(self.label)
+
+        bubble_container.setMaximumWidth(400)
+        bubble_container.setStyleSheet(
+            """
+            QWidget {
+                background: rgba(0, 198, 255, 0.08);
+                border: 1px solid rgba(0, 198, 255, 0.2);
+                border-radius: 18px;
+                margin: 3px 0px;
+            }
+            """
+        )
+
+        main_layout.addWidget(bubble_container)
+        main_layout.addStretch()
+
+    def setup_animation(self):
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(400)
+
+    def _build_text(self):
+        dots = "." * (self.dot_count % 4)
+        labels = {
+            "/project": "Scanning project",
+            "/find": "Searching files",
+            "/analyze": "Analyzing",
+            "/related": "Finding related",
+            "/recent": "Checking recent",
+        }
+        label = labels.get(self.command, "Working")
+        return f"  {label}{dots}"
+
+    def _tick(self):
+        if self._destroyed:
+            return
+        try:
+            self.dot_count += 1
+            self.label.setText(self._build_text())
+        except RuntimeError:
+            self.stop()
+
+    def update_progress(self, text):
+        """Update the loading text with a progress message."""
+        if self._destroyed:
+            return
+        try:
+            dots = "." * (self.dot_count % 4)
+            self.label.setText(f"  {text}{dots}")
+        except RuntimeError:
+            self.stop()
+
+    def stop(self):
+        self._destroyed = True
+        if self._timer and self._timer.isActive():
+            self._timer.stop()
+
+    def deleteLater(self):
+        self.stop()
+        super().deleteLater()
+
+
 class CapabilityCommandWorker(QThread):
     """Run heavier capability commands off the UI thread."""
 
     command_completed = pyqtSignal(dict)
     command_failed = pyqtSignal(str, str)
+    command_progress = pyqtSignal(str)
 
     def __init__(self, capabilities, command, args=None):
         super().__init__()
@@ -479,6 +579,7 @@ class CapabilityCommandWorker(QThread):
 
     def run(self):
         try:
+            self.command_progress.emit("Starting...")
             if self.command == "/project":
                 result = self.build_project_summary()
             elif self.command == "/find":
@@ -497,6 +598,7 @@ class CapabilityCommandWorker(QThread):
             self.command_failed.emit(self.command, str(exc))
 
     def build_project_summary(self):
+        self.command_progress.emit("Scanning workspace...")
         summary = self.capabilities.scan_project()
         if "error" in summary:
             return {"message_text": f"Project scan failed: {summary['error']}"}
@@ -527,6 +629,7 @@ class CapabilityCommandWorker(QThread):
 
     def build_find_files(self):
         pattern = self.args[0] if self.args else "*.py"
+        self.command_progress.emit(f"Searching for {pattern}...")
         matches = self.capabilities.find_files(pattern)
         if not matches:
             return {"message_text": f"No files matched `{pattern}`."}
@@ -552,7 +655,9 @@ class CapabilityCommandWorker(QThread):
             return {"message_text": "Use `/analyze path/to/file.py`."}
 
         file_path = self.args[0]
+        self.command_progress.emit(f"Reading {file_path}...")
         self.capabilities.get_file_context(file_path)
+        self.command_progress.emit(f"Analyzing structure...")
         analysis = self.capabilities.analyze_file(file_path)
         if analysis.get("language") == "unknown" and analysis.get("lines") == 0 and analysis.get("issues"):
             return {"message_text": f"Analysis failed for `{file_path}`: {analysis['issues'][0]}"}
@@ -584,10 +689,12 @@ class CapabilityCommandWorker(QThread):
             return {"message_text": "Use `/related path/to/file.py`."}
 
         file_path = self.args[0]
+        self.command_progress.emit(f"Scanning context for {file_path}...")
         context = self.capabilities.get_file_context(file_path)
         if "error" in context:
             return {"message_text": context["error"]}
 
+        self.command_progress.emit("Finding related files...")
         related = self.capabilities.get_related_files(file_path)
         recent_files = self.capabilities.get_recent_files()
         return {
@@ -607,6 +714,7 @@ class CapabilityCommandWorker(QThread):
         }
 
     def build_recent_files(self):
+        self.command_progress.emit("Gathering recent files...")
         recent_files = self.capabilities.get_recent_files()
         if not recent_files:
             return {"message_text": "No recent project files yet. Analyze a file first."}
@@ -630,6 +738,9 @@ class CommandProcessor:
         self.async_commands = {"/project", "/find", "/analyze", "/related", "/recent"}
         self._command_cache = {}  # Cache for command results
         self._cache_max_size = 50
+        self._active_loading_widget = None  # Currently shown loading receipt
+        self._active_command = None  # Track which command is loading
+        self._active_args = None
         self.commands = {
             "/help": self.show_help,
             "/clear": self.clear_conversation,
@@ -685,13 +796,21 @@ class CommandProcessor:
         # Check cache first
         cache_key = self._get_command_cache_key(command, args)
         if cache_key in self._command_cache:
-            # Use cached result
             self.handle_capability_result(self._command_cache[cache_key])
             return True
+
+        # Remove any existing loading widget
+        self._remove_loading_widget()
+
+        # Show loading receipt in chat
+        self._active_command = command
+        self._active_args = args
+        self._show_loading_widget(command)
 
         worker = CapabilityCommandWorker(capabilities, command, args)
         worker.command_completed.connect(self.handle_capability_result)
         worker.command_failed.connect(self.handle_capability_error)
+        worker.command_progress.connect(self._on_command_progress)
         worker.finished.connect(lambda: self.cleanup_capability_worker(worker))
         self.capability_workers.append(worker)
 
@@ -702,17 +821,19 @@ class CommandProcessor:
         return True
 
     def handle_capability_result(self, result):
+        # Remove loading receipt
+        self._remove_loading_widget()
+
         if hasattr(self.main_window, "status_bar_widget"):
             self.main_window.status_bar_widget.update_connection(True)
 
-        # Cache the result for future use
-        # We need to reconstruct the cache key from the result
-        # This is a simplified approach - in practice, we'd pass the command/args through
-        if result.get("tool_name"):
-            # Create a cache key based on tool name and focus file
-            cache_key = f"{result['tool_name']}:{result.get('focus_file', '')}"
+        # Cache the result using the command that produced it
+        if self._active_command:
+            cache_key = self._get_command_cache_key(self._active_command, self._active_args)
             self._command_cache[cache_key] = result
             self._manage_cache_size()
+        self._active_command = None
+        self._active_args = None
 
         if result.get("message_text"):
             self._post_to_chat(result["message_text"])
@@ -730,6 +851,11 @@ class CommandProcessor:
             self.main_window.update_workspace_context(focus_file)
 
     def handle_capability_error(self, command, error_text):
+        # Remove loading receipt
+        self._remove_loading_widget()
+        self._active_command = None
+        self._active_args = None
+
         if hasattr(self.main_window, "status_bar_widget"):
             self.main_window.status_bar_widget.update_connection(False)
         self._post_to_chat(f"{command} failed: {error_text}")
@@ -742,8 +868,11 @@ class CommandProcessor:
 
         worker.deleteLater()
 
-        if hasattr(self.main_window, "status_bar_widget") and not self.capability_workers:
-            self.main_window.status_bar_widget.update_connection(True)
+        # If no more workers, clear loading state
+        if not self.capability_workers:
+            self._remove_loading_widget()
+            if hasattr(self.main_window, "status_bar_widget"):
+                self.main_window.status_bar_widget.update_connection(True)
 
     def show_help(self, args=None):
         self._post_tool_card(
@@ -1057,6 +1186,42 @@ class CommandProcessor:
             "A safe settings reset flow is still queued for a later pass.",
         )
         return True
+
+    def _show_loading_widget(self, command):
+        """Insert a loading receipt into the chat area."""
+        try:
+            self._active_loading_widget = AsyncLoadingWidget(command)
+            if hasattr(self.main_window, "messages_layout") and hasattr(self.main_window, "messages_widget"):
+                layout = self.main_window.messages_layout
+                layout.insertWidget(layout.count() - 1, self._active_loading_widget)
+                QTimer.singleShot(50, self.main_window.scroll_to_bottom)
+        except Exception as e:
+            print(f"⚠️ Could not show loading widget: {e}")
+            self._active_loading_widget = None
+
+    def _remove_loading_widget(self):
+        """Remove the loading receipt from chat."""
+        if self._active_loading_widget:
+            try:
+                self._active_loading_widget.stop()
+                if hasattr(self.main_window, "messages_layout"):
+                    self.main_window.messages_layout.removeWidget(self._active_loading_widget)
+                self._active_loading_widget.deleteLater()
+            except RuntimeError:
+                pass
+            except Exception as e:
+                print(f"⚠️ Error removing loading widget: {e}")
+            finally:
+                self._active_loading_widget = None
+
+    def _on_command_progress(self, text):
+        """Update loading widget and status bar with progress text."""
+        # Update loading receipt
+        if self._active_loading_widget:
+            self._active_loading_widget.update_progress(text)
+        # Update status bar
+        if hasattr(self.main_window, "status_bar_widget"):
+            self.main_window.status_bar_widget.connection_label.setText(f"  {text}")
 
     def _post_to_chat(self, text):
         self.main_window.add_message_widget("ai", text, datetime.now())

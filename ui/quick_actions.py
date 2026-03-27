@@ -112,6 +112,11 @@ class SlashCommandMenu(QWidget):
             {"command": "/analyze", "description": "Analyze a project file", "icon": "A", "args": ["path"]},
             {"command": "/related", "description": "Show related files for a path", "icon": "L", "args": ["path"]},
             {"command": "/recent", "description": "Show recently inspected files", "icon": "R", "args": []},
+            {"command": "/browse", "description": "Open a URL in the browser", "icon": "W", "args": ["url"]},
+            {"command": "/search", "description": "Search the web", "icon": "G", "args": ["query"]},
+            {"command": "/task", "description": "Execute a real-world task", "icon": "T", "args": ["description"]},
+            {"command": "/portal", "description": "Find a hospital patient portal", "icon": "H", "args": ["hospital_name"]},
+            {"command": "/forms", "description": "Find patient forms from a hospital", "icon": "D", "args": ["hospital_name"]},
             {"command": "/settings", "description": "Open settings panel", "icon": "*", "args": []},
             {"command": "/model", "description": "Switch AI model", "icon": "M", "args": ["model_name"]},
             {"command": "/theme", "description": "Change color theme", "icon": "T", "args": ["theme_name"]},
@@ -590,6 +595,16 @@ class CapabilityCommandWorker(QThread):
                 result = self.build_related_files()
             elif self.command == "/recent":
                 result = self.build_recent_files()
+            elif self.command == "/browse":
+                result = self.build_browse_web()
+            elif self.command == "/search":
+                result = self.build_search_web()
+            elif self.command == "/task":
+                result = self.build_execute_task()
+            elif self.command == "/portal":
+                result = self.build_find_portal()
+            elif self.command == "/forms":
+                result = self.build_find_forms()
             else:
                 raise ValueError(f"Unsupported async command: {self.command}")
 
@@ -728,6 +743,118 @@ class CapabilityCommandWorker(QThread):
             "focus_file": recent_files[0],
         }
 
+    def build_browse_web(self):
+        url = self.args[0] if self.args else ""
+        if not url:
+            return {"message_text": "Use `/browse https://example.com`"}
+        self.command_progress.emit(f"Opening {url}...")
+        result = self.capabilities.web_navigate(url)
+        if not result["success"]:
+            return {"message_text": f"Browse failed: {result.get('error', 'Unknown error')}"}
+
+        # Get page text for context
+        self.command_progress.emit("Reading page...")
+        page_text = self.capabilities.web_get_text()
+        preview = page_text.get("text", "")[:500]
+
+        return {
+            "tool_name": "browse",
+            "title": f"Browsing: {result.get('title', url)}",
+            "subtitle": result.get("url", url),
+            "metrics": [
+                ("URL", result.get("url", url)),
+                ("Title", result.get("title", "Unknown")),
+            ],
+            "sections": [("Page Preview", [preview] if preview else ["No text content"])],
+        }
+
+    def build_search_web(self):
+        query = " ".join(self.args) if self.args else ""
+        if not query:
+            return {"message_text": "Use `/search your query here`"}
+        self.command_progress.emit(f"Searching: {query}...")
+        result = self.capabilities.web_search(query)
+        if not result["success"]:
+            return {"message_text": f"Search failed: {result.get('error', 'Unknown error')}"}
+
+        results = result.get("results", [])
+        result_lines = []
+        for r in results[:5]:
+            title = r.get("title", "No title")
+            url = r.get("url", "")
+            result_lines.append(f"{title}\n{url}")
+
+        return {
+            "tool_name": "search",
+            "title": f"Web Search: {query}",
+            "subtitle": f"{len(results)} results found",
+            "metrics": [("Query", query), ("Results", str(len(results)))],
+            "sections": [("Top Results", result_lines or ["No results found"])],
+        }
+
+    def build_execute_task(self):
+        task_desc = " ".join(self.args) if self.args else ""
+        if not task_desc:
+            return {"message_text": "Use `/task describe what you need done`"}
+        self.command_progress.emit(f"Working on: {task_desc[:50]}...")
+        result = self.capabilities.execute_task(task_desc)
+
+        steps = result.get("steps", [])
+        step_lines = [f"{'✅' if s.get('data', {}).get('success', True) else '❌'} {s.get('action', '')}: {s.get('description', '')}" for s in steps]
+        files = result.get("files", [])
+
+        sections = [("Steps", step_lines or ["No steps completed"])]
+        if files:
+            sections.append(("Downloaded Files", files))
+
+        return {
+            "tool_name": "task",
+            "title": f"Task: {task_desc[:60]}",
+            "subtitle": "Completed" if result.get("success") else "Needs attention",
+            "metrics": [
+                ("Status", "Done" if result.get("success") else "Partial"),
+                ("Steps", str(len(steps))),
+                ("Files", str(len(files))),
+            ],
+            "sections": sections,
+        }
+
+    def build_find_portal(self):
+        hospital = " ".join(self.args) if self.args else ""
+        if not hospital:
+            return {"message_text": "Use `/portal Hospital Name`"}
+        self.command_progress.emit(f"Finding portal for {hospital}...")
+        result = self.capabilities.find_hospital_portal(hospital)
+
+        portal_links = result.get("portal_links", [])
+        link_lines = [f"{r.get('title', 'Link')}: {r.get('url', '')}" for r in portal_links[:5]]
+
+        return {
+            "tool_name": "portal",
+            "title": f"Patient Portal: {hospital}",
+            "subtitle": result.get("message", ""),
+            "metrics": [("Hospital", hospital), ("Portal Links", str(len(portal_links)))],
+            "sections": [("Portal Links", link_lines or ["No portal found - try `/search {hospital} patient portal`"])],
+        }
+
+    def build_find_forms(self):
+        hospital = " ".join(self.args) if self.args else ""
+        if not hospital:
+            return {"message_text": "Use `/forms Hospital Name`"}
+        self.command_progress.emit(f"Searching for {hospital} forms...")
+        result = self.capabilities.find_patient_forms(hospital)
+
+        form_links = result.get("form_links", [])
+        link_lines = [f"{r.get('title', 'Form')}: {r.get('url', '')}" for r in form_links[:5]]
+
+        return {
+            "tool_name": "forms",
+            "title": f"Patient Forms: {hospital}",
+            "subtitle": result.get("message", ""),
+            "metrics": [("Hospital", hospital), ("Form Links", str(len(form_links)))],
+            "sections": [("Available Forms", link_lines or ["No forms found - try `/search {hospital} patient forms download`"])],
+        }
+
 
 class CommandProcessor:
     """Process slash commands and execute actions."""
@@ -735,7 +862,7 @@ class CommandProcessor:
     def __init__(self, main_window):
         self.main_window = main_window
         self.capability_workers = []
-        self.async_commands = {"/project", "/find", "/analyze", "/related", "/recent"}
+        self.async_commands = {"/project", "/find", "/analyze", "/related", "/recent", "/browse", "/search", "/task", "/portal", "/forms"}
         self._command_cache = {}  # Cache for command results
         self._cache_max_size = 50
         self._active_loading_widget = None  # Currently shown loading receipt
@@ -750,6 +877,11 @@ class CommandProcessor:
             "/analyze": self.analyze_file,
             "/related": self.related_files,
             "/recent": self.recent_files,
+            "/browse": self.browse_web,
+            "/search": self.search_web,
+            "/task": self.execute_real_task,
+            "/portal": self.find_portal,
+            "/forms": self.find_forms,
             "/settings": self.open_settings,
             "/model": self.switch_model,
             "/theme": self.change_theme,
@@ -885,15 +1017,30 @@ class CommandProcessor:
             ],
             sections=[
                 (
-                    "Core commands",
+                    "Project commands",
                     [
                         "/help, /clear, /export",
                         "/project, /find <pattern>, /analyze <path>",
                         "/related <path>, /recent",
+                    ],
+                ),
+                (
+                    "Web & real-world tasks",
+                    [
+                        "/browse <url> - Open a website",
+                        "/search <query> - Search the web",
+                        "/task <description> - Execute a real-world task",
+                        "/portal <hospital> - Find patient portal",
+                        "/forms <hospital> - Find patient forms",
+                    ],
+                ),
+                (
+                    "Settings",
+                    [
                         "/settings, /model <name>, /theme <name>",
                         "/shortcuts, /feedback, /stats, /reset",
                     ],
-                )
+                ),
             ],
         )
         return True
@@ -1114,6 +1261,140 @@ class CommandProcessor:
             sections=[("Recent files", recent_files[:8])],
         )
         self.main_window.update_workspace_context(recent_files[0])
+        return True
+
+    def browse_web(self, args=None):
+        capabilities = self.get_capabilities()
+        if not capabilities:
+            self._post_to_chat("Capabilities are not available in this session yet.")
+            return False
+        if not args:
+            self._post_to_chat("Use `/browse https://example.com`")
+            return False
+
+        result = capabilities.web_navigate(args[0])
+        if not result["success"]:
+            self._post_to_chat(f"Browse failed: {result.get('error', 'Unknown error')}")
+            return True
+
+        page_text = capabilities.web_get_text()
+        preview = page_text.get("text", "")[:500]
+        self._post_tool_card(
+            "browse",
+            f"Browsing: {result.get('title', args[0])}",
+            result.get("url", args[0]),
+            metrics=[("URL", result.get("url", args[0])), ("Title", result.get("title", "Unknown"))],
+            sections=[("Page Preview", [preview] if preview else ["No text content"])],
+        )
+        return True
+
+    def search_web(self, args=None):
+        capabilities = self.get_capabilities()
+        if not capabilities:
+            self._post_to_chat("Capabilities are not available in this session yet.")
+            return False
+
+        query = " ".join(args) if args else ""
+        if not query:
+            self._post_to_chat("Use `/search your query here`")
+            return False
+
+        result = capabilities.web_search(query)
+        if not result["success"]:
+            self._post_to_chat(f"Search failed: {result.get('error', 'Unknown error')}")
+            return True
+
+        results = result.get("results", [])
+        result_lines = []
+        for r in results[:5]:
+            title = r.get("title", "No title")
+            url = r.get("url", "")
+            result_lines.append(f"{title}\n{url}")
+
+        self._post_tool_card(
+            "search",
+            f"Web Search: {query}",
+            f"{len(results)} results found",
+            metrics=[("Query", query), ("Results", str(len(results)))],
+            sections=[("Top Results", result_lines or ["No results found"])],
+        )
+        return True
+
+    def execute_real_task(self, args=None):
+        capabilities = self.get_capabilities()
+        if not capabilities:
+            self._post_to_chat("Capabilities are not available in this session yet.")
+            return False
+
+        task_desc = " ".join(args) if args else ""
+        if not task_desc:
+            self._post_to_chat("Use `/task describe what you need done`")
+            return False
+
+        result = capabilities.execute_task(task_desc)
+        steps = result.get("steps", [])
+        step_lines = [f"{'✅' if s.get('data', {}).get('success', True) else '❌'} {s.get('action', '')}: {s.get('description', '')}" for s in steps]
+        files = result.get("files", [])
+
+        sections = [("Steps", step_lines or ["No steps completed"])]
+        if files:
+            sections.append(("Downloaded Files", files))
+
+        self._post_tool_card(
+            "task",
+            f"Task: {task_desc[:60]}",
+            "Completed" if result.get("success") else "Needs attention",
+            metrics=[("Status", "Done" if result.get("success") else "Partial"), ("Steps", str(len(steps))), ("Files", str(len(files)))],
+            sections=sections,
+        )
+        return True
+
+    def find_portal(self, args=None):
+        capabilities = self.get_capabilities()
+        if not capabilities:
+            self._post_to_chat("Capabilities are not available in this session yet.")
+            return False
+
+        hospital = " ".join(args) if args else ""
+        if not hospital:
+            self._post_to_chat("Use `/portal Hospital Name`")
+            return False
+
+        result = capabilities.find_hospital_portal(hospital)
+        portal_links = result.get("portal_links", [])
+        link_lines = [f"{r.get('title', 'Link')}: {r.get('url', '')}" for r in portal_links[:5]]
+
+        self._post_tool_card(
+            "portal",
+            f"Patient Portal: {hospital}",
+            result.get("message", ""),
+            metrics=[("Hospital", hospital), ("Portal Links", str(len(portal_links)))],
+            sections=[("Portal Links", link_lines or ["No portal found - try `/search {hospital} patient portal`"])],
+        )
+        return True
+
+    def find_forms(self, args=None):
+        capabilities = self.get_capabilities()
+        if not capabilities:
+            self._post_to_chat("Capabilities are not available in this session yet.")
+            return False
+
+        hospital = " ".join(args) if args else ""
+        if not hospital:
+            self._post_to_chat("Use `/forms Hospital Name`")
+            return False
+
+        result = capabilities.find_patient_forms(hospital)
+        form_links = result.get("form_links", [])
+        link_lines = [f"{r.get('title', 'Form')}: {r.get('url', '')}" for r in form_links[:5]]
+
+        self._post_tool_card(
+            "forms",
+            f"Patient Forms: {hospital}",
+            result.get("message", ""),
+            metrics=[("Hospital", hospital), ("Form Links", str(len(form_links)))],
+            sections=[("Available Forms", link_lines or ["No forms found - try `/search {hospital} patient forms download`"])],
+        )
         return True
 
     def open_settings(self, args=None):

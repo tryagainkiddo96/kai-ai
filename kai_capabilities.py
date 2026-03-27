@@ -949,7 +949,11 @@ class KaiCapabilities:
         self.command_executor = CommandExecutor(self.project_root)
         self.tool_registry = ToolRegistry()
         self.project_context = ProjectContext(self.project_root)
-        
+
+        # Lazy-loaded web automation
+        self._web_automation = None
+        self._task_executor = None
+
         # Register built-in tools
         self._register_builtin_tools()
 
@@ -1200,6 +1204,96 @@ class KaiCapabilities:
         """Execute a tool by name."""
         return self.tool_registry.execute_tool(tool_name, **kwargs)
 
+    # Web Automation Methods
+    def _get_web_automation(self):
+        """Lazy load web automation module."""
+        if self._web_automation is None:
+            try:
+                from kai_web_automation import BrowserAutomation, WebResearch, TaskExecutor
+                self._web_automation = BrowserAutomation(self.project_root)
+                self._web_research = WebResearch()
+                self._task_executor = TaskExecutor(self.project_root)
+            except ImportError as e:
+                return None, None, None, f"Web automation not available: {e}"
+        return self._web_automation, self._web_research, self._task_executor, None
+
+    def web_search(self, query: str, site: str = "") -> Dict:
+        """Search the web."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return browser.search(query, site)
+
+    def web_navigate(self, url: str) -> Dict:
+        """Navigate to a URL."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return browser.navigate(url)
+
+    def web_get_text(self) -> Dict:
+        """Get text from current web page."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return browser.get_page_text()
+
+    def web_find_forms(self) -> Dict:
+        """Find forms on current web page."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return browser.find_forms()
+
+    def web_click(self, selector: str) -> Dict:
+        """Click an element on the web page."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return browser.click(selector)
+
+    def web_download(self, url: str = None) -> Dict:
+        """Download a file from the web."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return browser.download_file(url)
+
+    def web_get_links(self) -> Dict:
+        """Get links from current page."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return browser.get_links()
+
+    def execute_task(self, task_description: str) -> Dict:
+        """Execute a natural language task."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return executor.execute_task(task_description)
+
+    def find_hospital_portal(self, hospital_name: str, city: str = "", state: str = "") -> Dict:
+        """Find a hospital's patient portal."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return research.find_hospital_portal(hospital_name, city, state)
+
+    def find_patient_forms(self, hospital_name: str, city: str = "", state: str = "") -> Dict:
+        """Find patient forms from a hospital."""
+        browser, research, executor, err = self._get_web_automation()
+        if err:
+            return {"success": False, "error": err}
+        return research.find_patient_forms(hospital_name, city, state)
+
+    def web_close(self):
+        """Close the browser."""
+        if self._web_automation:
+            self._web_automation.close()
+        if self._web_research:
+            self._web_research.close()
+
     # Utility Methods
     def get_capabilities_summary(self) -> Dict:
         """Get a summary of all capabilities."""
@@ -1221,6 +1315,10 @@ class KaiCapabilities:
             },
             'project_context': {
                 'features': ['project scanning', 'file context', 'related files', 'file search']
+            },
+            'web_automation': {
+                'features': ['web search', 'page navigation', 'form filling', 'file download', 'task execution', 'hospital portal finder'],
+                'status': 'active' if self._web_automation else 'lazy-loaded'
             },
             'tools': {
                 'total': len(self.tool_registry.tools),
